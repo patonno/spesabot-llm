@@ -77,10 +77,3 @@ The bot runs in the background with no public server or domain needed. Stop it a
 
 Group chat IDs are negative numbers. Members of an allowed group automatically share the same list.
 
----
-
-## 🧪 Running tests
-
-```powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
-```
