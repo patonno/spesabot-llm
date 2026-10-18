@@ -56,8 +56,6 @@ Then run:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-Copy-Item .env.example .env
-# Edit .env and fill in your TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_IDS, and GEMINI_API_KEY
 .\.venv\Scripts\python.exe bot.py
 ```
 
