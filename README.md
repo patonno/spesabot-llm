@@ -17,8 +17,8 @@ Send a voice message like *"aggiungi latte, togli le uova e prendi 2 kg di mele"
 - **Mark everything as bought** — with optional exceptions ("bought everything except bread")
 - **Clear the list** entirely with a confirmation step so you don't do it by accident
 
-### 🤝 Shared lists for groups
-Add the bot to a Telegram group and everyone in the group shares the same list. Each chat (or group) has its own separate list.
+### 🤝 Single shared household list
+All authorized users (`ALLOWED_CHAT_IDS`) share the same common household grocery list while interacting privately with the bot. Add, remove, or view items from your personal chat, and everyone in the household sees the same list.
 
 ### ⚡ Handles edge cases gracefully
 - **Duplicate items**: if you add something already on the list, the bot asks how to handle it — replace, sum, or ignore
@@ -73,5 +73,5 @@ The bot runs in the background with no public server or domain needed. Stop it a
 | `GEMINI_MODEL` | *(optional)* Gemini model to use (default: `gemini-2.0-flash`) |
 | `DATABASE_PATH` | *(optional)* Path to the SQLite database file (default: `spesabot.sqlite3`) |
 
-Group chat IDs are negative numbers. Members of an allowed group automatically share the same list.
+Add the chat IDs of all household members (separated by comma) to `ALLOWED_CHAT_IDS`. All authorized members automatically share the same common grocery list.
 

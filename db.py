@@ -11,7 +11,6 @@ from typing import Literal
 @dataclass(frozen=True)
 class Item:
     id: int
-    chat_id: int
     name: str
     quantity: str | None
     collected: bool
@@ -20,7 +19,6 @@ class Item:
 @dataclass(frozen=True)
 class PendingAdd:
     id: int
-    chat_id: int
     name: str
     quantity: str | None
 
@@ -28,7 +26,6 @@ class PendingAdd:
 @dataclass(frozen=True)
 class PendingRemoval:
     id: int
-    chat_id: int
     name: str
     quantity: str
 
@@ -59,7 +56,7 @@ class Store:
     """One connection, owned by one thread; writes are transactional.
 
     Names use normalized whitespace and case, without fuzzy matching.
-    Pending decisions are scoped to their originating chat and resolved FIFO.
+    Pending decisions are resolved FIFO for the household.
     """
 
     def __init__(self, path: str | Path = "spesabot.sqlite3") -> None:
@@ -70,33 +67,25 @@ class Store:
             self._db.executescript("""
                 CREATE TABLE IF NOT EXISTS items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
-                    name TEXT NOT NULL,
+                    name TEXT NOT NULL UNIQUE,
                     quantity TEXT,
                     collected INTEGER NOT NULL DEFAULT 0 CHECK(collected IN (0, 1)),
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE(chat_id, name)
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
                 CREATE TABLE IF NOT EXISTS pending_adds (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
                     quantity TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
-                CREATE INDEX IF NOT EXISTS pending_chat
-                    ON pending_adds(chat_id, id);
                 CREATE TABLE IF NOT EXISTS pending_removals (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
                     quantity TEXT NOT NULL,
                     item_id INTEGER NOT NULL,
                     original_quantity TEXT,
                     original_collected INTEGER NOT NULL
                 );
-                CREATE INDEX IF NOT EXISTS pending_removal_chat
-                    ON pending_removals(chat_id, id);
                 CREATE TABLE IF NOT EXISTS processed_messages (
                     chat_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
@@ -138,48 +127,48 @@ class Store:
 
     @staticmethod
     def _item(row: sqlite3.Row) -> Item:
-        return Item(row["id"], row["chat_id"], row["name"],
+        return Item(row["id"], row["name"],
                     row["quantity"], bool(row["collected"]))
 
-    def list_items(self, chat_id: int, *, include_collected: bool = False) -> list[Item]:
+    def list_items(self, *, include_collected: bool = False) -> list[Item]:
         rows = self._db.execute(
-            "SELECT * FROM items WHERE chat_id = ? AND (? OR collected = 0) ORDER BY id",
-            (chat_id, include_collected),
+            "SELECT * FROM items WHERE (? OR collected = 0) ORDER BY id",
+            (include_collected,),
         )
         return [self._item(row) for row in rows]
 
-    def get_item(self, chat_id: int, name: str) -> Item | None:
+    def get_item(self, name: str) -> Item | None:
         row = self._db.execute(
-            "SELECT * FROM items WHERE chat_id = ? AND name = ?", (chat_id, _name(name))
+            "SELECT * FROM items WHERE name = ?", (_name(name),)
         ).fetchone()
         return self._item(row) if row else None
 
-    def pending_adds(self, chat_id: int) -> list[PendingAdd]:
-        return [PendingAdd(row["id"], row["chat_id"], row["name"], row["quantity"])
+    def pending_adds(self) -> list[PendingAdd]:
+        return [PendingAdd(row["id"], row["name"], row["quantity"])
                 for row in self._db.execute(
-                    "SELECT * FROM pending_adds WHERE chat_id = ? ORDER BY id", (chat_id,)
+                    "SELECT * FROM pending_adds ORDER BY id"
                 )]
 
-    def add_item(self, chat_id: int, name: str, quantity: str | None = None) -> Item | PendingAdd:
+    def add_item(self, name: str, quantity: str | None = None) -> Item | PendingAdd:
         name, quantity = _name(name), _quantity(quantity)
         with self.transaction():
-            if self.get_item(chat_id, name) is not None:
+            if self.get_item(name) is not None:
                 cursor = self._db.execute(
-                    "INSERT INTO pending_adds(chat_id, name, quantity) VALUES (?, ?, ?)",
-                    (chat_id, name, quantity),
+                    "INSERT INTO pending_adds(name, quantity) VALUES (?, ?)",
+                    (name, quantity),
                 )
                 assert cursor.lastrowid is not None
-                return PendingAdd(cursor.lastrowid, chat_id, name, quantity)
+                return PendingAdd(cursor.lastrowid, name, quantity)
             cursor = self._db.execute(
-                "INSERT INTO items(chat_id, name, quantity) VALUES (?, ?, ?)",
-                (chat_id, name, quantity),
+                "INSERT INTO items(name, quantity) VALUES (?, ?)",
+                (name, quantity),
             )
             assert cursor.lastrowid is not None
-            return Item(cursor.lastrowid, chat_id, name, quantity, False)
+            return Item(cursor.lastrowid, name, quantity, False)
 
-    def resolve_add(self, chat_id: int, pending_id: int,
+    def resolve_add(self, pending_id: int,
                     choice: Literal["sum", "overwrite", "cancel"]) -> bool:
-        """Return False for expired or foreign callbacks; reject out-of-order ones.
+        """Return False for expired callbacks; reject out-of-order ones.
 
         If the original item has since been deleted, accepting restores it using
         the pending quantity. A repeated callback cannot apply a decision twice.
@@ -187,14 +176,14 @@ class Store:
         if choice not in {"sum", "overwrite", "cancel"}:
             raise ValueError("Unknown duplicate decision")
         with self.transaction():
-            pending = self.pending_adds(chat_id)
+            pending = self.pending_adds()
             target = next((p for p in pending if p.id == pending_id), None)
             if target is None:
                 return False
             if target != pending[0]:
                 raise ValueError("Resolve the oldest pending addition first")
             if choice != "cancel":
-                existing = self.get_item(chat_id, target.name)
+                existing = self.get_item(target.name)
                 quantity = target.quantity
                 if choice == "sum" and existing is not None:
                     old, new = numeric_quantity(existing.quantity), numeric_quantity(quantity)
@@ -202,108 +191,107 @@ class Store:
                         raise ValueError("Both quantities must be numeric to sum")
                     quantity = format(old + new, "f")
                 self._db.execute(
-                    """INSERT INTO items(chat_id, name, quantity) VALUES (?, ?, ?)
-                       ON CONFLICT(chat_id, name) DO UPDATE
+                    """INSERT INTO items(name, quantity) VALUES (?, ?)
+                       ON CONFLICT(name) DO UPDATE
                        SET quantity = excluded.quantity, collected = 0""",
-                    (chat_id, target.name, quantity),
+                    (target.name, quantity),
                 )
-            self._db.execute("DELETE FROM pending_adds WHERE id = ? AND chat_id = ?",
-                             (pending_id, chat_id))
+            self._db.execute("DELETE FROM pending_adds WHERE id = ?", (pending_id,))
             return True
 
-    def update_item(self, chat_id: int, name: str, *, quantity: str | None,
+    def update_item(self, name: str, *, quantity: str | None,
                     collected: bool = False) -> bool:
         with self.transaction():
             return self._db.execute(
-                "UPDATE items SET quantity = ?, collected = ? WHERE chat_id = ? AND name = ?",
-                (_quantity(quantity), int(collected), chat_id, _name(name)),
+                "UPDATE items SET quantity = ?, collected = ? WHERE name = ?",
+                (_quantity(quantity), int(collected), _name(name)),
             ).rowcount > 0
 
-    def delete_item(self, chat_id: int, name: str) -> bool:
+    def delete_item(self, name: str) -> bool:
         with self.transaction():
             return self._db.execute(
-                "DELETE FROM items WHERE chat_id = ? AND name = ?", (chat_id, _name(name))
+                "DELETE FROM items WHERE name = ?", (_name(name),)
             ).rowcount > 0
 
-    def clear(self, chat_id: int) -> None:
+    def clear(self) -> None:
         """Clear items and expire pending additions so old buttons cannot restore them."""
         with self.transaction():
-            self._db.execute("DELETE FROM items WHERE chat_id = ?", (chat_id,))
-            self._db.execute("DELETE FROM pending_adds WHERE chat_id = ?", (chat_id,))
-            self._db.execute("DELETE FROM pending_removals WHERE chat_id = ?", (chat_id,))
+            self._db.execute("DELETE FROM items")
+            self._db.execute("DELETE FROM pending_adds")
+            self._db.execute("DELETE FROM pending_removals")
 
-    def remove_item(self, chat_id: int, name: str,
+    def remove_item(self, name: str,
                     quantity: str | None = None) -> PendingRemoval | None:
         """Subtract plain numbers; ask for overwrite/keep when subtraction is ambiguous."""
         quantity = _quantity(quantity)
         with self.transaction():
-            item = self.get_item(chat_id, name)
+            item = self.get_item(name)
             if item is None or item.collected:
                 return None
             if quantity is None:
-                self.delete_item(chat_id, name)
+                self.delete_item(name)
                 return None
             old, amount = numeric_quantity(item.quantity), numeric_quantity(quantity)
             if old is not None and amount is not None:
                 if amount >= old:
-                    self.delete_item(chat_id, name)
+                    self.delete_item(name)
                 else:
-                    self.update_item(chat_id, name, quantity=format(old - amount, "f"))
+                    self.update_item(name, quantity=format(old - amount, "f"))
                 return None
             cursor = self._db.execute(
                 """INSERT INTO pending_removals
-                   (chat_id, name, quantity, item_id, original_quantity, original_collected)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (chat_id, item.name, quantity, item.id, item.quantity, int(item.collected)),
+                   (name, quantity, item_id, original_quantity, original_collected)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (item.name, quantity, item.id, item.quantity, int(item.collected)),
             )
             assert cursor.lastrowid is not None
-            return PendingRemoval(cursor.lastrowid, chat_id, item.name, quantity)
+            return PendingRemoval(cursor.lastrowid, item.name, quantity)
 
-    def pending_removals(self, chat_id: int) -> list[PendingRemoval]:
-        return [PendingRemoval(row["id"], row["chat_id"], row["name"], row["quantity"])
+    def pending_removals(self) -> list[PendingRemoval]:
+        return [PendingRemoval(row["id"], row["name"], row["quantity"])
                 for row in self._db.execute(
-                    "SELECT * FROM pending_removals WHERE chat_id = ? ORDER BY id", (chat_id,)
+                    "SELECT * FROM pending_removals ORDER BY id"
                 )]
 
-    def resolve_removal(self, chat_id: int, pending_id: int,
+    def resolve_removal(self, pending_id: int,
                         choice: Literal["overwrite", "keep"]) -> bool:
         """Overwrite means use the requested quantity as the remaining target.
 
-        Expired, foreign, or changed-item decisions return False. Stale decisions
+        Expired or changed-item decisions return False. Stale decisions
         are discarded without modifying the item or recreating a deleted item.
         """
         if choice not in {"overwrite", "keep"}:
             raise ValueError("Unknown removal decision")
         with self.transaction():
             row = self._db.execute(
-                "SELECT * FROM pending_removals WHERE chat_id = ? AND id = ?",
-                (chat_id, pending_id),
+                "SELECT * FROM pending_removals WHERE id = ?",
+                (pending_id,),
             ).fetchone()
             if row is None:
                 return False
-            if self.pending_removals(chat_id)[0].id != pending_id:
+            if self.pending_removals()[0].id != pending_id:
                 raise ValueError("Resolve the oldest pending removal first")
-            item = self.get_item(chat_id, row["name"])
+            item = self.get_item(row["name"])
             valid = (item is not None and item.id == row["item_id"]
                      and item.quantity == row["original_quantity"]
                      and item.collected == bool(row["original_collected"]))
             if valid and choice == "overwrite":
-                self.update_item(chat_id, row["name"], quantity=row["quantity"])
+                self.update_item(row["name"], quantity=row["quantity"])
             self._db.execute("DELETE FROM pending_removals WHERE id = ?", (pending_id,))
             return valid
 
-    def bought_all_except(self, chat_id: int,
+    def bought_all_except(self,
                           exceptions: list[tuple[str, str | None]]) -> None:
         with self.transaction():
-            self._db.execute("UPDATE items SET collected = 1 WHERE chat_id = ?", (chat_id,))
-            self._db.execute("DELETE FROM pending_removals WHERE chat_id = ?", (chat_id,))
+            self._db.execute("UPDATE items SET collected = 1")
+            self._db.execute("DELETE FROM pending_removals")
             for name, quantity in exceptions:
                 name, quantity = _name(name), _quantity(quantity)
                 self._db.execute(
-                    """INSERT INTO items(chat_id, name, quantity) VALUES (?, ?, ?)
-                       ON CONFLICT(chat_id, name) DO UPDATE SET collected = 0,
+                    """INSERT INTO items(name, quantity) VALUES (?, ?)
+                       ON CONFLICT(name) DO UPDATE SET collected = 0,
                        quantity = COALESCE(excluded.quantity, items.quantity)""",
-                    (chat_id, name, quantity),
+                    (name, quantity),
                 )
 
     def record_processed_message(self, chat_id: int, message_id: int) -> bool:
@@ -314,4 +302,3 @@ class Store:
             (chat_id, message_id),
         )
         return cursor.rowcount > 0
-

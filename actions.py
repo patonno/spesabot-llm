@@ -49,21 +49,21 @@ def validate_actions(payload: object) -> list[dict]:
     return actions
 
 
-def apply_actions(store: Store, chat_id: int, payload: object) -> ActionResult:
+def apply_actions(store: Store, payload: object) -> ActionResult:
     """Apply in spoken order; pending confirmations do not block later actions."""
     actions = validate_actions(payload)
     with store.transaction():
         for action in actions:
             kind = action["type"]
             if kind == "add":
-                store.add_item(chat_id, action["item"], action.get("quantity"))
+                store.add_item(action["item"], action.get("quantity"))
             elif kind == "remove":
-                store.remove_item(chat_id, action["item"], action.get("quantity"))
+                store.remove_item(action["item"], action.get("quantity"))
             elif kind == "clear":
-                store.clear(chat_id)
+                store.clear()
             else:
-                store.bought_all_except(chat_id, [
+                store.bought_all_except([
                     (item["item"], item.get("quantity")) for item in action["items"]
                 ])
-        return ActionResult(store.list_items(chat_id), store.pending_adds(chat_id),
-                            store.pending_removals(chat_id))
+        return ActionResult(store.list_items(), store.pending_adds(),
+                            store.pending_removals())

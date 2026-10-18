@@ -69,11 +69,11 @@ class GroceryBot:
                 pass
         return allowed
 
-    def pending_prompt(self, chat_id):
-        additions = self.store.pending_adds(chat_id)
+    def pending_prompt(self):
+        additions = self.store.pending_adds()
         if additions:
             pending = additions[0]
-            item = self.store.get_item(chat_id, pending.name)
+            item = self.store.get_item(pending.name)
             current = display_item(item.name, item.quantity) if item else "non più in lista"
             requested = display_item(pending.name, pending.quantity)
             text = f'Hai provato ad aggiungere {requested}.\n\nAbbiamo già in lista {current}.\n\nScegli come procedere.'
@@ -84,7 +84,7 @@ class GroceryBot:
             buttons.extend([Button("🔄 SOVRASCRIVI", callback_data=f"dup:ovw:{pending.id}"),
                             Button("❌ ANNULLA", callback_data=f"dup:cancel:{pending.id}")])
             return text, [buttons]
-        removals = self.store.pending_removals(chat_id)
+        removals = self.store.pending_removals()
         if removals:
             pending = removals[0]
             text = (f'Non posso sottrarre con certezza la quantità di {pending.name}.\n\n'
@@ -98,7 +98,7 @@ class GroceryBot:
         chat_id = update.effective_chat.id
         listing = ""
         if include_list:
-            items = self.store.list_items(chat_id)
+            items = self.store.list_items()
             listing = "📋 LISTA DELLA SPESA\n\n" + (
                 "\n".join(f"• {display_item(i.name, i.quantity)}" for i in items)
                 if items else "La lista è vuota.")
@@ -109,7 +109,7 @@ class GroceryBot:
             rows = [[Button("✅ Sì, svuota", callback_data=f"clear:confirm:{token}"),
                      Button("❌ Annulla", callback_data=f"clear:cancel:{token}")]]
         else:
-            prompt, rows = self.pending_prompt(chat_id)
+            prompt, rows = self.pending_prompt()
         text = "\n\n".join(part for part in (notice, listing, prompt) if part)
         if not text:
             text = "Nessuna operazione da mostrare."
@@ -215,7 +215,7 @@ class GroceryBot:
                 return
             actions = parsed.get("actions", [])
             if actions:
-                apply_actions(self.store, chat_id, parsed)
+                apply_actions(self.store, parsed)
 
         await _cleanup_status()
         if not actions:
@@ -226,7 +226,7 @@ class GroceryBot:
     async def process_actions(self, update, context, payload):
         """Entry point for testing action dispatch; never accepts Telegram text as JSON."""
         if await self.authorized(update):
-            apply_actions(self.store, update.effective_chat.id, payload)
+            apply_actions(self.store, payload)
             await self.show(update, context, "Lista aggiornata.")
 
 
@@ -252,7 +252,7 @@ class GroceryBot:
         if clear and self.clear_tokens.get(chat_id) == clear[2]:
             del self.clear_tokens[chat_id]
             if clear[1] == "confirm":
-                self.store.clear(chat_id)
+                self.store.clear()
                 notice = "Lista svuotata."
             else:
                 notice = "Operazione annullata."
@@ -265,13 +265,13 @@ class GroceryBot:
                         dup_choices: dict[str, Literal["sum", "overwrite", "cancel"]] = {
                             "sum": "sum", "ovw": "overwrite", "cancel": "cancel"
                         }
-                        if self.store.resolve_add(chat_id, pending_id, dup_choices[choice]):
+                        if self.store.resolve_add(pending_id, dup_choices[choice]):
                             notice = "Scelta registrata."
                     elif kind == "rem" and choice in ("ovw", "keep"):
                         rem_choices: dict[str, Literal["overwrite", "keep"]] = {
                             "ovw": "overwrite", "keep": "keep"
                         }
-                        if self.store.resolve_removal(chat_id, pending_id, rem_choices[choice]):
+                        if self.store.resolve_removal(pending_id, rem_choices[choice]):
                             notice = "Scelta registrata."
                 except ValueError:
                     notice = "La scelta non è disponibile. Controlla la richiesta attuale."
